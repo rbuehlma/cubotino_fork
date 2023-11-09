@@ -3734,9 +3734,143 @@ def start_up(first_cycle=False, set_cropping=False):
 
 
 
+def contour_touches_border(img_height, img_width, contour):
+    for pt in contour:
+        (x, y) = pt[0]
+        if x < img_width * 0.02 or x > img_width * 0.96:
+            return True
+        if y < img_height * 0.02 or y > img_height * 0.96:
+            return True
+    return False
+
+def get_cube_contour(image, orig):
+    contours, hierarchy =  cv2.findContours(image, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)               
+    best_contour = contours[0]
+    rect = cv2.minAreaRect(best_contour)
+    (x, y), (width, height), angle = rect
+    best_contourSize = width * height
+    img_height, img_width = image.shape
+
+    base_contour_factor = 0.1
+    base_contour_width_distance = img_width * base_contour_factor
+    base_contour_height_distance = img_height * base_contour_factor
+    base_contour = np.intp([
+        [[base_contour_width_distance, base_contour_height_distance]],
+        [[img_width - base_contour_width_distance, base_contour_height_distance]],
+        [[img_width - base_contour_width_distance, img_height - base_contour_height_distance]],
+        [[base_contour_width_distance, img_height - base_contour_height_distance]]
+    ])
+
+    contours = contours + [base_contour, ]
+
+    selected_contours = []
+
+    for contour in contours:
+        if contour_touches_border(img_height, img_width, contour):
+            continue
+
+        (x, y), (width, height), angle = cv2.minAreaRect(contour)
+        size = width*height
+
+        if size < (img_height*img_width) * 0.05:
+            continue
+
+        selected_contours.append(contour)
+
+    merged_contour = np.concatenate(selected_contours)
+
+    return cv2.minAreaRect(merged_contour)
 
 
+def calculate_dominating_color(image):
+    reshaped_image = image.reshape((-1,3))
+    reshaped_image = np.float32(reshaped_image)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    K = 4
+    ret,label,center=cv2.kmeans(reshaped_image,K,None,criteria,5,cv2.KMEANS_RANDOM_CENTERS)
 
+    count = {}
+
+    for l in label:
+        l = l[0]
+        if not l in count.keys():
+            count[l] = 0
+        count[l] = count[l] + 1
+
+    label_for_biggest_cluster = max(count, key=count.get)
+    c = np.uint8(center)[label_for_biggest_cluster]
+    return (int(c[0]),int(c[1]),int(c[2]))
+
+def get_cube_contour_with_multiple_thresholds(image):
+
+    img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    img_height, img_width = img_gray.shape
+
+    best_contour = ''
+    best_threshold_score = 999
+
+    for threshold in [50, 100, 150, 200]:
+        ret, thresh = cv2.threshold(img_gray, threshold, 255, cv2.RETR_EXTERNAL)
+        (x, y), (width, height), angle = get_cube_contour(thresh, image)
+        while angle > 45:
+            tmp = width
+            width = height
+            height = tmp
+            angle -= 90
+        score = np.linalg.norm([angle / 45, 0.1 - abs(img_width-width)/img_width, 0.1 - abs(img_height-height)/img_height, 1 - width/height])
+        if score < best_threshold_score:
+            best_threshold_score = score
+            best_contour = (x, y), (width, height), angle
+
+    (x, y), (width, height), angle = best_contour
+
+    if (width < img_width * 0.7):
+        print("Bad contour with with: " + str(width))
+        
+    if (height < img_height * 0.7):
+        print("Bad contour with height: " + str(height))
+        
+    if angle < -10 or angle > 10:
+        print("Bad contour with angle: " + str(angle))
+
+    return best_contour
+
+def calculate_facelet_based_on_cube_contour(contour, image):
+    (x, y), (width, height), angle = contour
+
+    rot_mat = cv2.getRotationMatrix2D((x, y), angle, 1.0)
+    image = cv2.warpAffine(image, rot_mat, image.shape[1::-1], flags=cv2.INTER_LINEAR)
+    box = cv2.boxPoints(((x, y), (width, height), 0))
+    box = np.intp(box)
+
+    image_copy = image.copy()
+    facelets = []
+    for i in range(3):
+        for j in range(3):
+            centerX = x - width / 2 + width / 6 * (2 * j + 1) 
+            centerY = y - height / 2 + height / 6 * (2 * i + 1)
+
+            y1 = np.intp(centerY - height / 6 * 0.7)
+            y2 = np.intp(centerY + height / 6 * 0.7)
+            x1 = np.intp(centerX - width / 6 * 0.7)
+            x2 = np.intp(centerX + width / 6 * 0.7)
+
+            dominating_color = calculate_dominating_color(image[y1:y2, x1:x2])
+            
+            box = cv2.boxPoints(((centerX, centerY), (width / 3 * 0.9, height / 3 * 0.9), 0))
+            box = np.intp(box)
+            cv2.rectangle(image_copy, (x1, y1), (x2, y2), (dominating_color[0], dominating_color[1], dominating_color[2]), 2)
+            pts=np.array([(x1, y1), (x2, y1), (x2, y2), (x1, y2)], dtype="int32") 
+            facelets.append({'area': (height / 3 * width / 3), 'cx': centerX, 'cy': centerY, 'contour': pts, 'cont_ordered':pts, 'color': dominating_color})
+
+    #displayImage(image_copy)
+    return facelets
+
+
+def displayImage(image):
+    cv2.imshow('image',image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 def cubeAF():
     """ This function is substantially the main function, covering all the different phases after the initial settings:
@@ -3775,6 +3909,7 @@ def cubeAF():
         camera_ready_time=time.time()               # time stored after picamera warmup and settings for consistent pictures
         side = 1                                    # side is changed to 1, as the cube faces are numbered from 1 to 6
 
+    BGR_mean = []
 
     while not robot_stop:                           # substantially the main loop, it can be interrupted by quit_func() 
         if robot_stop:                              # case the robot has been stopped
@@ -3787,134 +3922,81 @@ def cubeAF():
             cv2.namedWindow('cube')                 # create the cube window
             if fixWindPos:                          # case the fixWindPos variable is chosen  
                 cv2.moveWindow('cube', 0,0)         # move the window to (0,0)
+
+        image = frame
+        cv2.imwrite("/tmp/img_" + str(side) + ".jpg", image)
+
+        best_contour = get_cube_contour_with_multiple_thresholds(image)            
+
+        facelets = calculate_facelet_based_on_cube_contour(best_contour, image)
+
+        if timeout or robot_stop:                        # in case of reached timeout or stop_button pressed
+            quit_func(quit_script=False)                 # quit function is called, withou forcing the script quitting
+            break                                        # while loop is interrupted
         
-        if not robot_stop:                                   # case there are no requests to stop the robot
-            (contours, hierarchy)=read_facelets(frame, w, h) # reads cube's facelets and returns the contours
-            candidates = []                                  # empties the list of potential contours
+        if  time.time() - camera_ready_time > detect_timeout:  # timeout is calculated for the robot during cube status reading
+            timeout = robot_timeout_func()                     # in case the timeout is reached
+            break 
         
-        if not robot_stop and hierarchy is not None:         # analyze the contours in case these are previously retrieved
-            hierarchy = hierarchy[0]                         # only top level contours (no childs)
-            facelets = []                                    # empties the list of contours having cube's square characteristics
-            
-            if timeout or robot_stop:                        # in case of reached timeout or stop_button pressed
-                quit_func(quit_script=False)                 # quit function is called, withou forcing the script quitting
-                break                                        # while loop is interrupted
-            
-            for component in zip(contours, hierarchy):                # each contour is analyzed   
-                contour, hierarchy, corners = get_approx_contours(component)  # contours are approximated
-    
-                if  time.time() - camera_ready_time > detect_timeout:  # timeout is calculated for the robot during cube status reading
-                    timeout = robot_timeout_func()                     # in case the timeout is reached
-                    break                                              # for loop is interrupted
-                
-                if robot_stop:                                         # case the robot has been stopped
-                    break                                              # for loop is interrupted
-                
-                if screen and not robot_stop:                          # case screen variable is set true on __main__
-                    cv2.imshow('cube', frame)                          # shows the frame 
-                    cv2.waitKey(1)      # refresh time is minimized to 1ms, refresh time mostly depending to all other functions
-                
-                if corners==4:                                         # contours with 4 corners are of interest
-                    facelets, frame = get_facelets(facelets, frame, contour, hierarchy) # returns a dict with cube compatible contours
-
-                if len(facelets)==9:                                   # case there are 9 contours having facelets compatible characteristics
-                    facelets = order_9points(facelets, new_center=[])  # contours are ordered from top left
-                    d_to_exclude = distance_deviation(facelets)        # facelets to remove due inter-distance not as regular 3x3 array
-                    if len(d_to_exclude)>=1:                           # check if any contour is too far to be part of the cube
-                        d_to_exclude.sort(reverse=True)                # reverse the contours order
-                        for i in d_to_exclude:                         # remove the contours too faar far to be part of the cube
-                            facelets.pop(i)                            # facelet is removed
-                
-                if len(facelets)==9:                                               # case having 9 contours compatible to a cube face
-                    robot_facelets_rotation(facelets)                              # order facelets as per viewer POW (due to cube/camera rotations on robot)
-                    read_color(frame, facelets, candidates, BGR_mean, H_mean)      # each facelet is read for color
-                    URFDLB_facelets_BGR_mean = URFDLB_facelets_order(BGR_mean)     # facelets are ordered as per URFDLB order
-                    plot_to_display(side, URFDLB_facelets_BGR_mean)                # detected colour are plot to the display
-#                     if not screen and side ==6:
-#                         time.sleep(0.3)
-                    faces = face_image(frame, facelets, side, faces)               # image of the cube side is taken for later reference
-                    
-                    if screen and not robot_stop:                # case screen variable is set true on __main__
-                        if cv_wow:                               # case the cv image analysis plot is set true                              
-                            cv2.destroyWindow('cube')            # cube window is closed
-                            show_cv_wow(frame, time = 4000 if Rpi_ZeroW else 2000)  # call the function that shows the cv_wow image
-                        else:                                    # case the cv image analysis plot is set false
-                            for i in range(9):                   # iteration
-                                cv2.imshow('cube', frame)        # shows the frame 
-                                cv2.waitKey(10)                  # refresh time is minimized (1ms), yet real time is much higher
-                            time.sleep(vnc_delay)                # delay for cube face change, to compensate VNC viewer delay
-                    
-                    robot_to_cube_side(side, cam_led_bright)     # cube is rotated/flipped to the next face
-                    
-
-                    if side < 6:                                 # actions when a face has been completely detected, and there still are other to come
-                        side +=1                                 # cube side index is incremented
-                        break                                    # with this break the process re-starts from contour detection at the next cube face
-
-                    if side == 6:                                # case last cube's face is acquired
-                        disp.clean_display()                     # cleans the display
-                        servo.cam_led_Off()                      # led at top_cover is set off         
-                        cube_detect_time = time.time()           # time stored after detecteing all the cube facelets
-                        if screen:                               # case screen variable is set true on __main__
-                            try:                                 # tentative
-                                cv2.destroyAllWindows()          # cube window and eventual other open windows are closed
-                            except:                              # in case of exceptions
-                                pass                             # do nothing
-                        
-                        # cube string status with colors detected 
-                        cube_status, HSV_detected, cube_color_seq, HSV_analysis = cube_colors_interpr(URFDLB_facelets_BGR_mean)
-                        cube_status_string = cube_string(cube_status)                 # cube string for the solver
-                        solution, solution_Text = cube_solution(cube_status_string)   # Kociemba solver is called to have the solution string
-                        color_detection_winner='BGR'                                  # variable used to log which method gave the solution
-                        cube_solution_time=time.time()                                # time stored after getting the cube solution
-                        print(f'\nCube status (via BGR color distance): {cube_status_string}')   # feedback is printed to the terminal
-                        print(f'Camera warm-up, camera setting, cube status (BGR), and solution, in: {round(time.time()-start_time,1)} secs')
-                        
-################### DEBUG #############             
-#                         solution_Text = 'Error' # uncoment this row to force HSV color analysis method (this assignes 'Error' to solution_Text variable)
-#######################################             
-
-                        if solution_Text == 'Error':               # if colors interpretation on BGR color distance fail an attempt is made on HSV
-                            print(f'Solver return: {solution}\n')  # feedback is printed to the terminal
-                            a, b, c = cube_colors_interpr_HSV(URFDLB_facelets_BGR_mean,HSV_detected) # cube string status with colors detected
-                            cube_status, cube_status_HSV, cube_color_seq = a, b, c        # cube string status with colors detected to variables with proper name
-                            cube_status_string = cube_string(cube_status)                 # cube string for the solver
-                            solution, solution_Text = cube_solution(cube_status_string)   # Kociemba solver is called to have the solution string
-                            color_detection_winner='HSV'                                  # variable used to log which method give the solution
-                            cube_solution_time=time.time()                                # time stored after getting the cube solution
-                            print('Camera warm-up, camera setting, cube status (HSV), and solution, in:', round(time.time()-start_time,1))
-                            if solution_Text == 'Error':                   # in case color color detection fail also with HSV approach
-                                color_detection_winner='Error'             # the winner approach goes to error, for log purpose
-                            else: 
-                                print(f'\nCube status (via HSV color distance): {cube_status_string}')  # nice information to print at terminal, sometime useful to copy
-                                print(f'\nCube solution: {solution_Text}') # nice information to print at terminal, sometime useful to copy 
-
-      
-                        elif solution_Text != '0 moves  ':                 # case of interest, the cube isn't already solved
-                            print(f'\nCube solution: {solution_Text}')     # nice information to print at terminal, sometime useful to copy 
-                        
-
-                        # function related to cube solving via the robot
-                        robot_solve_cube(fixWindPos, screen, frame, faces, cube_status, cube_color_seq, HSV_analysis, 
-                                            URFDLB_facelets_BGR_mean, font, fontScale, lineType, show_time, timestamp,
-                                            solution, solution_Text, color_detection_winner, cube_status_string, BGR_mean,
-                                            HSV_detected, start_time, camera_ready_time, cube_detect_time,
-                                            cube_solution_time, os_version) 
-                        
-                        return              # closes the cube reading/solver function in case it reaches the end
-                
-                
-                # case there are less than 9 contours detected, yet shown on screen as feedback
-                if screen and not robot_stop:        # case screen variable is set true on __main__
+        robot_facelets_rotation(facelets)                              # order facelets as per viewer POW (due to cube/camera rotations on robot)
+        BGR_mean += ([f["color"] for f in facelets])
+        URFDLB_facelets_BGR_mean = URFDLB_facelets_order(BGR_mean)     # facelets are ordered as per URFDLB order
+        plot_to_display(side, URFDLB_facelets_BGR_mean)                # detected colour are plot to the display
+        faces = face_image(frame, facelets, side, faces)               # image of the cube side is taken for later reference
+        
+        if screen and not robot_stop:                # case screen variable is set true on __main__
+            if cv_wow:                               # case the cv image analysis plot is set true                              
+                cv2.destroyWindow('cube')            # cube window is closed
+                show_cv_wow(frame, time = 4000 if Rpi_ZeroW else 2000)  # call the function that shows the cv_wow image
+            else:                                    # case the cv image analysis plot is set false
+                for i in range(len(facelets)):                   # iteration
                     cv2.imshow('cube', frame)        # shows the frame 
-                    cv2.waitKey(1)                   # refresh time is minimized to 1ms, real refresh time depends on other functions
-              
+                    cv2.waitKey(10)                  # refresh time is minimized (1ms), yet real time is much higher
+                time.sleep(vnc_delay)                # delay for cube face change, to compensate VNC viewer delay
         
-        # AF_cube function closing part
-        if timeout==True or robot_stop ==True:       # timeout or robot being stopped
-            quit_func(quit_script=False)             # quit function is called, withou forcing the script quitting
-            return                                   # cubeAF function is terminated
+        robot_to_cube_side(side, cam_led_bright)     # cube is rotated/flipped to the next face
+
+        if side < 6:                                 # actions when a face has been completely detected, and there still are other to come
+            side +=1                                 # cube side index is incremented
+            continue                                    # with this break the process re-starts from contour detection at the next cube face
+
+        if side == 6:                                # case last cube's face is acquired
+            disp.clean_display()                     # cleans the display
+            servo.cam_led_Off()                      # led at top_cover is set off         
+            cube_detect_time = time.time()           # time stored after detecteing all the cube facelets
+            if screen:                               # case screen variable is set true on __main__
+                try:                                 # tentative
+                    cv2.destroyAllWindows()          # cube window and eventual other open windows are closed
+                except:                              # in case of exceptions
+                    pass                             # do nothing
+
+            # cube string status with colors detected 
+            cube_status, HSV_detected, cube_color_seq, HSV_analysis = cube_colors_interpr(URFDLB_facelets_BGR_mean)
+            cube_status_string = cube_string(cube_status)                 # cube string for the solver
+            solution, solution_Text = cube_solution(cube_status_string)   # Kociemba solver is called to have the solution string                               # variable used to log which method gave the solution
+            cube_solution_time=time.time()                                # time stored after getting the cube solution
+            print(f'\nCube status (via BGR color distance): {cube_status_string}')   # feedback is printed to the terminal
+            print(f'Camera warm-up, camera setting, cube status (BGR), and solution, in: {round(time.time()-start_time,1)} secs')
+            
+            if solution_Text != '0 moves  ':                 # case of interest, the cube isn't already solved
+                print(f'\nCube solution: {solution_Text}')     # nice information to print at terminal, sometime useful to copy 
+            
+
+            # function related to cube solving via the robot
+            robot_solve_cube(fixWindPos, screen, frame, faces, cube_status, cube_color_seq, HSV_analysis, 
+                                URFDLB_facelets_BGR_mean, font, fontScale, lineType, show_time, timestamp,
+                                solution, solution_Text, 'BGR', cube_status_string, BGR_mean,
+                                HSV_detected, start_time, camera_ready_time, cube_detect_time,
+                                cube_solution_time, os_version) 
+            
+            return              # closes the cube reading/solver function in case it reaches the end
     
+    
+    # case there are less than 9 contours detected, yet shown on screen as feedback
+    if screen and not robot_stop:        # case screen variable is set true on __main__
+        cv2.imshow('cube', frame)        # shows the frame 
+        cv2.waitKey(1)                   # refresh time is minimized to 1ms, real refresh time depends on other functions
+        
     # AF_cube function closing part
     if timeout==True or robot_stop ==True:           # timeout or robot being stopped
         quit_func(quit_script=False)                 # quit function is called, withou forcing the script quitting
