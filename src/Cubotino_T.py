@@ -3744,11 +3744,7 @@ def contour_touches_border(img_height, img_width, contour):
     return False
 
 def get_cube_contour(image, orig):
-    contours, hierarchy =  cv2.findContours(image, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)               
-    best_contour = contours[0]
-    rect = cv2.minAreaRect(best_contour)
-    (x, y), (width, height), angle = rect
-    best_contourSize = width * height
+    contours, hierarchy =  cv2.findContours(image, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
     img_height, img_width = image.shape
 
     base_contour_factor = 0.1
